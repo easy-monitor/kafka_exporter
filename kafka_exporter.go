@@ -492,7 +492,7 @@ func main() {
 
 		opts = kafkaOpts{}
 	)
-	kingpin.Flag("kafka.server", "Address (host:port) of Kafka server.").Default("kafka:9092").StringsVar(&opts.uri)
+	kingpin.Flag("kafka.server", "Address (host:port) of Kafka server.").StringsVar(&opts.uri)
 	kingpin.Flag("sasl.enabled", "Connect using SASL/PLAIN.").Default("false").BoolVar(&opts.useSASL)
 	kingpin.Flag("sasl.handshake", "Only set this to false if using a non-Kafka SASL proxy.").Default("true").BoolVar(&opts.useSASLHandshake)
 	kingpin.Flag("sasl.username", "SASL user name.").Default("").StringVar(&opts.saslUsername)
@@ -620,12 +620,16 @@ func main() {
 		sarama.Logger = log.New(os.Stdout, "[sarama] ", log.LstdFlags)
 	}
 
-	exporter, err := NewExporter(opts, *topicFilter, *groupFilter)
-	if err != nil {
-		plog.Fatalln(err)
+	if len(opts.uri) != 0 && opts.uri[0] != "" {
+		exporter, err := NewExporter(opts, *topicFilter, *groupFilter)
+		if err != nil {
+			plog.Fatalln(err)
+		}
+		defer exporter.client.Close()
+		prometheus.MustRegister(exporter)
+	} else {
+		http.HandleFunc("/scrape", newScrapeHandle(opts, *topicFilter, *groupFilter))
 	}
-	defer exporter.client.Close()
-	prometheus.MustRegister(exporter)
 
 	http.Handle(*metricsPath, promhttp.Handler())
 	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
@@ -644,4 +648,28 @@ func main() {
 
 	plog.Infoln("Listening on", *listenAddress)
 	plog.Fatal(http.ListenAndServe(*listenAddress, nil))
+}
+
+func newScrapeHandle(opts kafkaOpts, topicFilter string, groupFilter string) func(w http.ResponseWriter, r *http.Request) {
+	return func(w http.ResponseWriter, r *http.Request) {
+		target := r.URL.Query().Get("target")
+		if target == "" {
+			http.Error(w, "'target' parameter must be specified", http.StatusBadRequest)
+			return
+		}
+		opts.uri = strings.Split(target, ",")
+
+		zkUri := r.URL.Query().Get("zkhosts")
+		if zkUri != "" {
+			opts.useZooKeeperLag = true
+			opts.uriZookeeper = strings.Split(zkUri, ",")
+		}
+		exporter, err := NewExporter(opts, topicFilter, groupFilter)
+		if err != nil {
+			return
+		}
+		defer exporter.client.Close()
+		prometheus.MustRegister(exporter)
+		promhttp.Handler().ServeHTTP(w, r)
+	}
 }
