@@ -669,7 +669,14 @@ func newScrapeHandle(opts kafkaOpts, topicFilter string, groupFilter string) fun
 			return
 		}
 		defer exporter.client.Close()
-		prometheus.MustRegister(exporter)
-		promhttp.Handler().ServeHTTP(w, r)
+		registry := prometheus.NewRegistry()
+		registry.MustRegister(exporter)
+		gatherers := prometheus.Gatherers{
+			prometheus.DefaultGatherer,
+			registry,
+		}
+		// Delegate http serving to Prometheus client library, which will call collector.Collect.
+		h := promhttp.HandlerFor(gatherers, promhttp.HandlerOpts{})
+		h.ServeHTTP(w, r)
 	}
 }
